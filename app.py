@@ -253,16 +253,21 @@ def detect(image_pil, threshold):
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     ov      = ImageDraw.Draw(overlay)
     for s, l, t, r, b in valid:
-        ov.rectangle([l, t, r, b], fill=(232, 87, 10, 55))
+        ov.rectangle([l, t, r, b], fill=(232, 87, 10, 90))
 
     result = Image.alpha_composite(base, overlay).convert("RGB")
     draw   = ImageDraw.Draw(result)
+    w, h   = result.size
+    thick  = max(4, int(min(w, h) * 0.006))   # espessura proporcional ao tamanho da imagem
     for s, l, t, r, b in valid:
-        for px in range(2):
-            draw.rectangle([l+px, t+px, r-px, b-px], outline=(232, 87, 10))
-        lbl = f"{s:.0%}"
-        draw.rectangle([l, max(t-18, 0), l + len(lbl)*8 + 6, max(t, 18)], fill=(232, 87, 10))
-        draw.text((l+4, max(t-15, 2)), lbl, fill=(255, 255, 255))
+        for px in range(thick):
+            draw.rectangle([l+px, t+px, r-px, b-px], outline=(220, 60, 0))
+        lbl  = f"{s:.0%}"
+        tw   = len(lbl) * 10 + 10
+        th   = 22
+        ty   = max(t - th, 0)
+        draw.rectangle([l, ty, l + tw, ty + th], fill=(220, 60, 0))
+        draw.text((l + 5, ty + 4), lbl, fill=(255, 255, 255))
 
     return result, valid, rust_mask.sum() / (h * w)
 
