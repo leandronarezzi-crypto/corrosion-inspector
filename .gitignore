@@ -1,0 +1,24 @@
+# modelos e dados pesados
+*.pb
+*.h5
+*.record
+*.csv
+*.config
+*.pbtxt
+
+# notebooks e checkpoints
+*.ipynb
+.ipynb_checkpoints/
+
+# pastas de dados
+download/
+logs/
+objDet/
+rustnorust_b/
+
+# outros
+*.png
+*.pyc
+__pycache__/
+.DS_Store
+floyd.yml
