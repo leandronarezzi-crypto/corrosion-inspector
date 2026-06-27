@@ -1,12 +1,21 @@
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 
+import os
+import json
+import base64
 import streamlit as st
+import streamlit.components.v1 as _stcomp
 import numpy as np
 from PIL import Image, ImageDraw
 import requests
 from io import BytesIO
-from streamlit_drawable_canvas import st_canvas
+
+# Custom annotation canvas (replaces streamlit-drawable-canvas)
+_ANN_COMP = _stcomp.declare_component(
+    "annotation_canvas",
+    path=os.path.join(os.path.dirname(os.path.abspath(__file__)), "annotation_component")
+)
 
 ROBOFLOW_API_KEY = "iUlu1ZIT04nqMXMjLtiz"
 ROBOFLOW_PROJECT = "corrosiondetector"
@@ -355,72 +364,59 @@ else:
                 st.markdown(detection_row(i, s, area_pct), unsafe_allow_html=True)
 
     # ── FERRAMENTA DE CORREÇÃO ────────────────────────────────────────────────
-    with st.expander("✏️ Correct detections — add or remove boxes"):
-        st.markdown('<div style="font-size:0.75rem;color:#64748B;margin-bottom:10px">Use the tool below to fix missing or incorrect detections. Draw new boxes or select and delete existing ones, then click <b>Recalculate</b>.</div>', unsafe_allow_html=True)
+    with st.expander("✏️ Correct detections — draw or delete boxes"):
 
-        tool_col, hint_col = st.columns([2, 3])
-        with tool_col:
-            draw_mode_label = st.radio("Tool", ["Draw new box", "Select / Delete box"],
-                                       horizontal=True, label_visibility="collapsed")
-        with hint_col:
-            if draw_mode_label == "Draw new box":
-                st.markdown('<div style="font-size:0.72rem;color:#94A3B8;padding-top:6px">Click and drag on the image to mark a new corrosion area.</div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div style="font-size:0.72rem;color:#94A3B8;padding-top:6px">Click a box to select it, then press <b>Delete</b> or <b>Backspace</b> to remove it.</div>', unsafe_allow_html=True)
+        # Prepare display image (max 800px wide for performance)
+        MAX_W  = 800
+        iw, ih = img.size
+        if iw > MAX_W:
+            disp_scale = MAX_W / iw
+            disp_img   = img.resize((MAX_W, int(ih * disp_scale)), Image.LANCZOS)
+        else:
+            disp_scale = 1.0
+            disp_img   = img.copy()
 
-        fabric_mode = "rect" if draw_mode_label == "Draw new box" else "transform"
+        buf = BytesIO()
+        disp_img.convert("RGB").save(buf, format="JPEG", quality=78)
+        img_b64 = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
-        # Scale image to fixed canvas width
-        canvas_w = 700
-        iw, ih   = img.size
-        canvas_h = int(ih * canvas_w / iw)
-        scale    = canvas_w / iw
-        bg_img   = img.resize((canvas_w, canvas_h), Image.LANCZOS)
+        # Reset session state when detections change (new image / new threshold)
+        det_key = hash(tuple((l, t, r, b) for _, l, t, r, b in detections))
+        if st.session_state.get("_ann_det_key") != det_key:
+            st.session_state._ann_det_key = det_key
+            st.session_state._ann_rects = [
+                {"x": round(l * disp_scale, 1), "y": round(t * disp_scale, 1),
+                 "w": round((r - l) * disp_scale, 1), "h": round((b - t) * disp_scale, 1)}
+                for _, l, t, r, b in detections
+            ]
 
-        # Pre-populate canvas with existing detections
-        init_objects = []
-        for s, l, t, r, b in detections:
-            init_objects.append({
-                "type": "rect",
-                "version": "4.4.0",
-                "originX": "left", "originY": "top",
-                "left":   round(l * scale),
-                "top":    round(t * scale),
-                "width":  round((r - l) * scale),
-                "height": round((b - t) * scale),
-                "fill":   "rgba(232,87,10,0.25)",
-                "stroke": "rgb(220,60,0)",
-                "strokeWidth": 2,
-                "strokeUniform": True,
-                "selectable": True,
-                "evented": True,
-            })
-
-        canvas_result = st_canvas(
-            fill_color="rgba(232,87,10,0.25)",
-            stroke_width=2,
-            stroke_color="rgb(220,60,0)",
-            background_image=bg_img,
-            initial_drawing={"version": "4.4.0", "objects": init_objects},
-            update_streamlit=True,
-            height=canvas_h,
-            width=canvas_w,
-            drawing_mode=fabric_mode,
-            key="annotation_canvas",
+        # Render custom annotation canvas
+        comp_val = _ANN_COMP(
+            image=img_b64,
+            rects=st.session_state._ann_rects,
+            key="ann_canvas",
+            default=None,
         )
 
-        if st.button("Recalculate metrics", type="primary"):
+        # Update session state when user draws / deletes
+        if comp_val is not None:
+            if isinstance(comp_val, str):
+                try:   comp_val = json.loads(comp_val)
+                except: comp_val = []
+            st.session_state._ann_rects = comp_val
+
+        st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
+
+        # Recalculate button
+        if st.button("Recalculate with corrections", type="primary", key="recalc_btn"):
+            curr = st.session_state.get("_ann_rects", [])
             new_dets = []
-            if canvas_result.json_data:
-                for obj in canvas_result.json_data.get("objects", []):
-                    if obj.get("type") == "rect":
-                        l2 = int(obj["left"] / scale)
-                        t2 = int(obj["top"]  / scale)
-                        w2 = int(obj["width"]  * obj.get("scaleX", 1) / scale)
-                        h2 = int(obj["height"] * obj.get("scaleY", 1) / scale)
-                        r2, b2 = l2 + w2, t2 + h2
-                        new_dets.append((0.9, max(0,l2), max(0,t2),
-                                         min(img.width,r2), min(img.height,b2)))
+            for rc in curr:
+                l2 = max(0,         int(rc["x"] / disp_scale))
+                t2 = max(0,         int(rc["y"] / disp_scale))
+                r2 = min(img.width,  int((rc["x"] + rc["w"]) / disp_scale))
+                b2 = min(img.height, int((rc["y"] + rc["h"]) / disp_scale))
+                new_dets.append((0.9, l2, t2, r2, b2))
 
             mask = np.zeros((img.height, img.width), dtype=bool)
             for _, l2, t2, r2, b2 in new_dets:
@@ -431,9 +427,9 @@ else:
             ag2, ar2          = classify_astm_d610(new_cov)
             at2, ad2, ac2     = recommended_action(ri2)
 
-            st.markdown("**Updated results:**")
+            st.markdown('<div style="font-family:\'DM Mono\',monospace;font-size:0.48rem;color:#94A3B8;letter-spacing:0.18em;text-transform:uppercase;margin:8px 0 4px">Corrected Results</div>', unsafe_allow_html=True)
             um1, um2, um3 = st.columns(3)
-            um1.markdown(stat_card("Areas",    str(len(new_dets)), "corrected", "#E8570A"), unsafe_allow_html=True)
-            um2.markdown(stat_card("Coverage", f"{new_cov:.1%}",   "surface",   "#EF4444"), unsafe_allow_html=True)
-            um3.markdown(stat_card("ISO Grade", ri2,               rl2,          rc2),      unsafe_allow_html=True)
+            um1.markdown(stat_card("Areas",     str(len(new_dets)), "corrected", "#E8570A"), unsafe_allow_html=True)
+            um2.markdown(stat_card("Coverage",  f"{new_cov:.1%}",   "surface",   "#EF4444"), unsafe_allow_html=True)
+            um3.markdown(stat_card("ISO Grade", ri2,                rl2,          rc2),      unsafe_allow_html=True)
             render_norm_section(ri2, rl2, rc2, ag2, ar2, at2, ad2, ac2)

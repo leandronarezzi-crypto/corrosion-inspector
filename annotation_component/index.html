@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, sans-serif; background: #F0F3F8; overflow: hidden; }
+
+.toolbar {
+    display: flex; align-items: center; gap: 6px; padding: 7px 10px;
+    background: white; border-bottom: 1px solid #E2E8F0; flex-wrap: wrap;
+}
+.btn {
+    padding: 5px 13px; border-radius: 5px; font-size: 12px; font-weight: 500;
+    border: 1px solid #CBD5E1; background: white; cursor: pointer;
+    white-space: nowrap; font-family: inherit;
+}
+.btn.active  { background: #EA580C; color: white; border-color: #EA580C; }
+.btn.danger  { color: #DC2626; border-color: #FECACA; }
+.btn.danger:hover { background: #FEF2F2; }
+.hint { font-size: 11px; color: #94A3B8; flex: 1; min-width: 0; }
+
+#wrap {
+    position: relative; width: 100%; background: #E2E8F0;
+}
+#cvs {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    cursor: crosshair; touch-action: none; display: none;
+}
+#loading {
+    text-align: center; padding: 32px; color: #94A3B8; font-size: 12px;
+    display: none;
+}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+    <button class="btn active" id="btn-draw" onclick="setMode('draw')">+ Draw Box</button>
+    <button class="btn"        id="btn-sel"  onclick="setMode('select')">Select</button>
+    <button class="btn danger" id="btn-del"  onclick="deleteSelected()" style="display:none">Delete Selected</button>
+    <span class="hint" id="hint">Click and drag to mark corrosion areas</span>
+</div>
+
+<div id="wrap">
+    <div id="loading">Loading image…</div>
+    <canvas id="cvs"></canvas>
+</div>
+
+<script>
+var cvs     = document.getElementById('cvs');
+var ctx     = cvs.getContext('2d');
+var wrap    = document.getElementById('wrap');
+var loading = document.getElementById('loading');
+
+var img    = new Image();
+var imgW   = 1, imgH = 1;
+var rects  = [];      // [{x,y,w,h}] in original image pixel coords
+var sel    = -1;
+var mode   = 'draw';
+var drag   = false;
+var sx = 0, sy = 0, ex = 0, ey = 0;
+var ready  = false;
+
+// ── Mode toggle ─────────────────────────────────────────────────────────────
+
+function setMode(m) {
+    mode = m; sel = -1;
+    document.getElementById('btn-draw').className = 'btn' + (m==='draw'  ? ' active' : '');
+    document.getElementById('btn-sel') .className = 'btn' + (m==='select'? ' active' : '');
+    document.getElementById('btn-del') .style.display = 'none';
+    document.getElementById('hint').textContent =
+        m === 'draw'
+            ? 'Click and drag to mark corrosion areas'
+            : 'Click a box to select it, then press Delete or the button above';
+    cvs.style.cursor = m === 'draw' ? 'crosshair' : 'pointer';
+    redraw();
+}
+
+function deleteSelected() {
+    if (sel < 0) return;
+    rects.splice(sel, 1);
+    sel = -1;
+    document.getElementById('btn-del').style.display = 'none';
+    redraw();
+    send();
+}
+
+// ── Coordinate helpers ───────────────────────────────────────────────────────
+
+function getPos(cx, cy) {
+    var r  = cvs.getBoundingClientRect();
+    var sx = imgW / r.width;
+    var sy = imgH / r.height;
+    return { x: (cx - r.left) * sx, y: (cy - r.top) * sy };
+}
+
+function hitTest(p) {
+    for (var i = rects.length - 1; i >= 0; i--) {
+        var r = rects[i];
+        if (p.x >= r.x && p.x <= r.x+r.w && p.y >= r.y && p.y <= r.y+r.h) return i;
+    }
+    return -1;
+}
+
+// ── Mouse events ─────────────────────────────────────────────────────────────
+
+function onDown(cx, cy) {
+    if (!ready) return;
+    var p = getPos(cx, cy);
+    if (mode === 'draw') {
+        drag = true;
+        sx = p.x; sy = p.y; ex = p.x; ey = p.y;
+    } else {
+        sel = hitTest(p);
+        document.getElementById('btn-del').style.display = sel >= 0 ? 'inline-block' : 'none';
+        redraw();
+    }
+}
+
+function onMove(cx, cy) {
+    if (!drag) return;
+    var p = getPos(cx, cy);
+    ex = p.x; ey = p.y;
+    redraw();
+    // draw in-progress rect
+    var lw = Math.max(2, imgW * 0.0025);
+    ctx.fillStyle   = 'rgba(232,87,10,0.22)';
+    ctx.strokeStyle = '#DC3C00';
+    ctx.lineWidth   = lw;
+    ctx.setLineDash([]);
+    var rx = Math.min(sx,ex), ry = Math.min(sy,ey);
+    var rw = Math.abs(ex-sx),  rh = Math.abs(ey-sy);
+    ctx.fillRect(rx, ry, rw, rh);
+    ctx.strokeRect(rx, ry, rw, rh);
+}
+
+function onUp(cx, cy) {
+    if (!drag) return;
+    drag = false;
+    var p = getPos(cx, cy);
+    ex = p.x; ey = p.y;
+    var rw = Math.abs(ex-sx), rh = Math.abs(ey-sy);
+    if (rw > 6 && rh > 6) {
+        rects.push({ x: Math.min(sx,ex), y: Math.min(sy,ey), w: rw, h: rh });
+        send();
+    }
+    redraw();
+}
+
+cvs.addEventListener('mousedown', function(e){ onDown(e.clientX, e.clientY); });
+cvs.addEventListener('mousemove', function(e){ onMove(e.clientX, e.clientY); });
+cvs.addEventListener('mouseup',   function(e){ onUp(e.clientX,   e.clientY); });
+
+cvs.addEventListener('touchstart', function(e){
+    e.preventDefault();
+    var t = e.touches[0];
+    onDown(t.clientX, t.clientY);
+}, {passive:false});
+cvs.addEventListener('touchmove', function(e){
+    e.preventDefault();
+    var t = e.touches[0];
+    onMove(t.clientX, t.clientY);
+}, {passive:false});
+cvs.addEventListener('touchend', function(e){
+    e.preventDefault();
+    var t = e.changedTouches[0];
+    onUp(t.clientX, t.clientY);
+}, {passive:false});
+
+document.addEventListener('keydown', function(e){
+    if ((e.key==='Delete'||e.key==='Backspace') && sel>=0 && mode==='select'){
+        e.preventDefault();
+        deleteSelected();
+    }
+});
+
+// ── Draw ─────────────────────────────────────────────────────────────────────
+
+function redraw() {
+    if (!ready) return;
+    ctx.clearRect(0, 0, cvs.width, cvs.height);
+    ctx.drawImage(img, 0, 0, cvs.width, cvs.height);
+
+    var lw = Math.max(2, imgW * 0.0025);
+    rects.forEach(function(r, i) {
+        var isSel = i === sel;
+        ctx.fillStyle   = isSel ? 'rgba(239,68,68,0.28)'  : 'rgba(232,87,10,0.22)';
+        ctx.strokeStyle = isSel ? '#DC2626'                 : '#DC3C00';
+        ctx.lineWidth   = isSel ? lw * 1.6 : lw;
+        ctx.setLineDash(isSel ? [8,5] : []);
+        ctx.fillRect(r.x, r.y, r.w, r.h);
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+    });
+    ctx.setLineDash([]);
+}
+
+// ── Communication with Streamlit ─────────────────────────────────────────────
+
+function send() {
+    window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: 'streamlit:setComponentValue',
+        value: rects,
+        dataType: 'json'
+    }, '*');
+}
+
+function reportHeight() {
+    var toolbarH = document.querySelector('.toolbar').offsetHeight;
+    // Canvas display height = displayed width * (imgH/imgW)
+    var dispW = cvs.getBoundingClientRect().width || window.innerWidth;
+    var canvasH = ready ? Math.round(dispW * imgH / imgW) : 0;
+    var total = toolbarH + canvasH + 4;
+    wrap.style.height = (ready ? canvasH : 40) + 'px';
+    window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: 'streamlit:setFrameHeight',
+        height: total
+    }, '*');
+}
+
+// Receive render event from Streamlit
+window.addEventListener('message', function(e) {
+    if (!e.data || e.data.type !== 'streamlit:render') return;
+    var args = e.data.args || {};
+
+    if (args.image) {
+        loading.style.display = 'block';
+        cvs.style.display = 'none';
+        ready = false;
+
+        img.onload = function() {
+            imgW = img.naturalWidth;
+            imgH = img.naturalHeight;
+            cvs.width  = imgW;
+            cvs.height = imgH;
+
+            if (args.rects && Array.isArray(args.rects)) {
+                rects = args.rects;
+            }
+
+            loading.style.display = 'none';
+            cvs.style.display = 'block';
+            ready = true;
+            redraw();
+            setTimeout(reportHeight, 80);
+        };
+        img.onerror = function() {
+            loading.textContent = 'Error loading image.';
+        };
+        img.src = args.image;
+    }
+});
+
+window.addEventListener('resize', function() {
+    if (ready) setTimeout(reportHeight, 60);
+});
+
+// Signal ready
+window.parent.postMessage({
+    isStreamlitMessage: true,
+    type: 'streamlit:componentReady',
+    apiVersion: 1
+}, '*');
+</script>
+</body>
+</html>
