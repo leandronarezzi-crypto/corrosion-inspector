@@ -3,6 +3,7 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 import os
 import json
+import time
 import base64
 import streamlit as st
 import streamlit.components.v1 as _stcomp
@@ -281,6 +282,72 @@ def detect(image_pil, threshold):
 
     return result, valid, rust_mask.sum() / (h * w)
 
+# ── ROBOFLOW UPLOAD ───────────────────────────────────────────────────────────
+
+def _rf_workspace():
+    """Return workspace slug (cached in session state)."""
+    if "_rf_ws" not in st.session_state:
+        resp = requests.get(
+            "https://api.roboflow.com/",
+            params={"api_key": ROBOFLOW_API_KEY},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        st.session_state._rf_ws = resp.json()["workspace"]["url"]
+    return st.session_state._rf_ws
+
+def save_to_roboflow(image_pil, corrected_rects, disp_scale):
+    """Upload corrected image + YOLO annotations to Roboflow dataset.
+    Returns (image_id, n_boxes).
+    """
+    ws   = _rf_workspace()
+    base_url = f"https://api.roboflow.com/dataset/{ws}/{ROBOFLOW_PROJECT}"
+
+    # Encode image as base64 JPEG
+    img_w, img_h = image_pil.size
+    buf = BytesIO()
+    image_pil.convert("RGB").save(buf, format="JPEG", quality=90)
+    img_b64  = base64.b64encode(buf.getvalue()).decode("ascii")
+    img_name = f"correction_{int(time.time())}.jpg"
+
+    up = requests.post(
+        f"{base_url}/upload",
+        params={"api_key": ROBOFLOW_API_KEY, "name": img_name, "split": "train"},
+        data=img_b64,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
+    up.raise_for_status()
+    result = up.json()
+    if not result.get("id"):
+        raise ValueError(f"Upload failed: {result}")
+
+    image_id = result["id"]
+
+    # Build YOLO annotation (class 0 = rust, coords normalised to [0,1])
+    lines = []
+    for rc in corrected_rects:
+        l  = rc["x"] / disp_scale
+        t  = rc["y"] / disp_scale
+        bw = rc["w"] / disp_scale
+        bh = rc["h"] / disp_scale
+        xc = max(0.0, min(1.0, (l + bw / 2) / img_w))
+        yc = max(0.0, min(1.0, (t + bh / 2) / img_h))
+        wn = max(0.0, min(1.0, bw / img_w))
+        hn = max(0.0, min(1.0, bh / img_h))
+        lines.append(f"0 {xc:.6f} {yc:.6f} {wn:.6f} {hn:.6f}")
+
+    ann = requests.post(
+        f"{base_url}/annotate/{image_id}",
+        params={"api_key": ROBOFLOW_API_KEY, "name": img_name.replace(".jpg", ".txt")},
+        data="\n".join(lines),
+        headers={"Content-Type": "text/plain"},
+        timeout=30,
+    )
+    ann.raise_for_status()
+
+    return image_id, len(lines)
+
 # ── LAYOUT ────────────────────────────────────────────────────────────────────
 
 # ── Barra de controles: título | upload | slider+badge
@@ -407,8 +474,42 @@ else:
 
         st.markdown('<div style="height:8px"></div>', unsafe_allow_html=True)
 
-        # Recalculate button
-        if st.button("Recalculate with corrections", type="primary", key="recalc_btn"):
+        # ── Botões: Recalcular | Salvar no Roboflow
+        btn_col1, btn_col2 = st.columns([3, 4])
+
+        with btn_col1:
+            do_recalc = st.button("Recalculate metrics", type="primary", key="recalc_btn")
+        with btn_col2:
+            do_save = st.button("Save corrections to Roboflow", key="save_rf_btn")
+
+        saved_n = st.session_state.get("_rf_saved_count", 0)
+        if saved_n:
+            pct_to_retrain = min(100, int(saved_n / 30 * 100))
+            st.markdown(
+                f'<div style="font-size:0.62rem;color:#64748B;margin-top:4px">'
+                f'<b style="color:#EA580C">{saved_n}</b> correction{"s" if saved_n!=1 else ""} saved to dataset · '
+                f'<span style="color:{"#16A34A" if saved_n>=30 else "#94A3B8"}">'
+                f'{"Ready to retrain ✓" if saved_n>=30 else f"{pct_to_retrain}% toward recommended 30 examples"}'
+                f'</span></div>',
+                unsafe_allow_html=True
+            )
+
+        if do_save:
+            curr = st.session_state.get("_ann_rects", [])
+            with st.spinner("Uploading to Roboflow dataset…"):
+                try:
+                    img_id, n_boxes = save_to_roboflow(img, curr, disp_scale)
+                    st.session_state._rf_saved_count = st.session_state.get("_rf_saved_count", 0) + 1
+                    st.success(
+                        f"Saved — {n_boxes} box{'es' if n_boxes!=1 else ''} uploaded. "
+                        f"ID: {img_id[:10]}… "
+                        f"[Retrain in Roboflow](https://app.roboflow.com/{ROBOFLOW_PROJECT}) "
+                        f"when you have ~30 corrections."
+                    )
+                except Exception as e:
+                    st.error(f"Upload failed: {e}")
+
+        if do_recalc:
             curr = st.session_state.get("_ann_rects", [])
             new_dets = []
             for rc in curr:
